@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Metehan Koparan Deneme (Browser)</title>
+  <style>
+    :root{
+      --bg:#0b1020;
+      --grid:#101a36;
+      --obst:#f97316;
+      --snakeHead:#22c55e;
+      --snakeBody:#16a34a;
+      --food:#60a5fa;
+      --gold:#facc15;
+      --text:#e5e7eb;
+      --soft:#cbd5e1;
+      --panel:#111827;
+    }
+    body{
+      margin:0; background:var(--bg); color:var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      display:flex; align-items:center; justify-content:center; min-height:100vh;
+    }
+    .wrap{ display:flex; gap:16px; padding:16px; }
+    canvas{
+      background:var(--bg);
+      border-radius:16px;
+      box-shadow: 0 18px 60px rgba(0,0,0,.45);
+    }
+    .side{
+      width:280px;
+      background:rgba(17,24,39,.75);
+      border:1px solid rgba(255,255,255,.06);
+      border-radius:16px;
+      padding:14px;
+      backdrop-filter: blur(8px);
+      height: fit-content;
+    }
+    .title{ font-size:18px; font-weight:800; letter-spacing:.4px; }
+    .muted{ color:var(--soft); font-size:12px; line-height:1.35; }
+    .stat{ margin-top:10px; display:grid; grid-template-columns: 1fr auto; gap:8px; font-weight:700; }
+    .btnrow{ display:flex; gap:10px; margin-top:12px; }
+    button{
+      cursor:pointer; border:1px solid rgba(255,255,255,.08);
+      background:#0b1224; color:var(--text);
+      padding:10px 12px; border-radius:12px; font-weight:800;
+      transition: transform .06s ease, background .12s ease;
+      flex:1;
+    }
+    button:hover{ background:#0f1b3a; }
+    button:active{ transform: scale(.98); }
+    .hr{ height:1px; background:rgba(255,255,255,.07); margin:12px 0; }
+    .lb{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size:12px; color:var(--soft);
+      max-height:240px; overflow:auto;
+      border-radius:12px; padding:10px;
+      background: rgba(0,0,0,.18);
+      border:1px solid rgba(255,255,255,.06);
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="c"></canvas>
+
+  <div class="side">
+    <div class="title">METEHAN KOPARAN DENEME</div>
+    <div class="muted" style="margin-top:6px">
+      Kontrol: <b>Oklar / WASD</b><br>
+      Duraklat: <b>Space</b> · Yeniden: <b>R</b><br>
+      Altın: <b>+3</b> (parıltı)
+    </div>
+
+    <div class="stat">
+      <div>Skor</div><div id="score">0</div>
+      <div>En Yüksek</div><div id="high">0</div>
+      <div>Hız</div><div id="spd">0.0 fps</div>
+      <div>Combo</div><div id="combo">-</div>
+    </div>
+
+    <div class="btnrow">
+      <button id="btnRestart">Restart</button>
+      <button id="btnClear">Skor Sil</button>
+    </div>
+
+    <div class="hr"></div>
+    <div class="muted" style="font-weight:800; margin-bottom:6px">LEADERBOARD (Top 5)</div>
+    <div id="lb" class="lb"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // -----------------------------
+  // Ayarlar (Python sürümündeki mantığa yakın)  :contentReference[oaicite:1]{index=1}
+  // -----------------------------
+  const CELL = 28;
+  const GRID_W = 38, GRID_H = 28;
+  const HUD_H = 0; // sağ panel var, canvas içine HUD koymuyoruz
+  const W = GRID_W * CELL;
+  const H = GRID_H * CELL + HUD_H;
+
+  let TICK_MS = 120;
+  const TICK_MIN_MS = 55;
+  const SPEEDUP_EVERY = 6;
+  const MAP_SHIFT_EVERY_SEC = 18;
+  const OBSTACLE_COUNT_BASE = 26;
+  const COMBO_WINDOW_SEC = 1.25;
+
+  const FOOD_NORMAL_COUNT = 2;
+  const FOOD_GOLD_COUNT = 1;
+  const GOLD_SCORE = 3;
+
+  const COLORS = {
+    bg: getCss("--bg"),
+    grid: getCss("--grid"),
+    obst: getCss("--obst"),
+    wall: getCss("--obst"),
+    head: getCss("--snakeHead"),
+    body: getCss("--snakeBody"),
+    food: getCss("--food"),
+    gold: getCss("--gold"),
+    text: getCss("--text"),
+    soft: getCss("--soft"),
+    panel: getCss("--panel"),
+    sparkle1: "#fff7c2",
+    sparkle2: "#fde68a",
+  };
+
+  const SAVE_KEY = "tatli_yilan_scores_v1";
+
+  const c = document.getElementById("c");
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext("2d");
+
+  // UI
+  const scoreEl = document.getElementById("score");
+  const highEl = document.getElementById("high");
+  const spdEl = document.getElementById("spd");
+  const comboEl = document.getElementById("combo");
+  const lbEl = document.getElementById("lb");
+
+  document.getElementById("btnRestart").onclick = () => reset();
+  document.getElementById("btnClear").onclick = () => {
+    localStorage.removeItem(SAVE_KEY);
+    loadScores();
+    renderLeaderboard();
+  };
+
+  // -----------------------------
+  // Utils
+  // -----------------------------
+  function getCss(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function clamp(x,a,b){ return Math.max(a, Math.min(b, x)); }
+  function now(){ return performance.now() / 1000; }
+  function randInt(a,b){ return (Math.random()*(b-a+1)|0)+a; }
+  function choice(arr){ return arr[(Math.random()*arr.length)|0]; }
+  function key(x,y){ return x + "," + y; }
+
+  // -----------------------------
+  // Skorlar
+  // -----------------------------
+  let scoreData = { highscore: 0, leaderboard: [] };
+
+  function loadScores(){
+    try{
+      const raw = localStorage.getItem(SAVE_KEY);
+      if(raw){
+        const d = JSON.parse(raw);
+        if(d && typeof d === "object"){
+          scoreData.highscore = +d.highscore || 0;
+          scoreData.leaderboard = Array.isArray(d.leaderboard) ? d.leaderboard.slice(0,5) : [];
+        }
+      }
+    }catch(e){}
+    highEl.textContent = scoreData.highscore;
+  }
+
+  function saveScores(){
+    try{
+      localStorage.setItem(SAVE_KEY, JSON.stringify(scoreData));
+    }catch(e){}
+  }
+
+  function recordScore(s){
+    const ts = new Date();
+    const stamp = ts.getFullYear()+"-"+String(ts.getMonth()+1).padStart(2,"0")+"-"+String(ts.getDate()).padStart(2,"0")
+      +" "+String(ts.getHours()).padStart(2,"0")+":"+String(ts.getMinutes()).padStart(2,"0");
+
+    scoreData.leaderboard.push({ score: s|0, ts: stamp });
+    scoreData.leaderboard.sort((a,b)=>b.score-a.score);
+    scoreData.leaderboard = scoreData.leaderboard.slice(0,5);
+    if(s > scoreData.highscore) scoreData.highscore = s|0;
+    saveScores();
+    highEl.textContent = scoreData.highscore;
+    renderLeaderboard();
+  }
+
+  function renderLeaderboard(){
+    const rows = scoreData.leaderboard.slice(0,5);
+    if(!rows.length){
+      lbEl.textContent = "Henüz kayıt yok.";
+      return;
+    }
+    const lines = [];
+    for(let i=0;i<rows.length;i++){
+      const r = rows[i];
+      lines.push(`${String(i+1).padStart(2," ")}. ${String(r.score).padEnd(3," ")} ${r.ts}`);
+    }
+    lbEl.textContent = lines.join("\n");
+  }
+
+  // -----------------------------
+  // Oyun state
+  // -----------------------------
+  let paused = false;
+  let gameOver = false;
+
+  let tickMs = TICK_MS;
+  let eaten = 0;
+  let score = 0;
+
+  let combo = 0;
+  let lastEat = 0;
+
+  let snake = [];
+  let dir = {x:1, y:0};
+  let nextDir = {x:1, y:0};
+
+  let walls = new Set();
+  let obstacles = new Set();
+
+  let foods = []; // {x,y,type:"normal"|"gold"}
+  let lastMapShift = 0;
+
+  // stars
+  let stars = [];
+  function makeStars(n=110){
+    stars = [];
+    for(let i=0;i<n;i++){
+      stars.push({
+        x: Math.random()*W,
+        y: Math.random()*H,
+        r: choice([1.0,1.2,1.6]),
+        vx: choice([-0.35,-0.15,0.0,0.15,0.35]),
+        vy: 0.6 + Math.random()*1.2,
+        tw: randInt(14,34),
+        phase: randInt(0,1000)
+      });
+    }
+  }
+
+  // float texts
+  let floatTexts = []; // {x,y,vy,born,text,kind}
+  const FLOAT_LIFE = 0.75;
+
+  function addFloatText(gx,gy,text,kind="score"){
+    floatTexts.push({
+      x: gx*CELL + CELL/2,
+      y: gy*CELL + CELL/2,
+      vy: kind==="score" ? -1.4 : -1.2,
+      born: now(),
+      text: ""+text,
+      kind
+    });
+  }
+
+  // sparkles
+  let sparkles = []; // {x,y,vx,vy,born,life}
+  function spawnGoldSparkles(gx,gy,count=12){
+    const cx = gx*CELL + CELL/2;
+    const cy = gy*CELL + CELL/2;
+    const t = now();
+    for(let i=0;i<count;i++){
+      const spd = 0.8 + Math.random()*1.4;
+      sparkles.push({
+        x: cx + (Math.random()*6-3),
+        y: cy + (Math.random()*6-3),
+        vx: (Math.random()<0.5?-1:1) * spd * 0.6,
+        vy: -spd,
+        born: t,
+        life: 0.35 + Math.random()*0.3
+      });
+    }
+  }
+
+  // -----------------------------
+  // Harita & yemekler
+  // -----------------------------
+  function buildWalls(){
+    walls = new Set();
+    for(let x=0;x<GRID_W;x++){
+      walls.add(key(x,0));
+      walls.add(key(x,GRID_H-1));
+    }
+    for(let y=0;y<GRID_H;y++){
+      walls.add(key(0,y));
+      walls.add(key(GRID_W-1,y));
+    }
+  }
+
+  function occupiedSet(){
+    const occ = new Set();
+    for(const p of snake) occ.add(key(p.x,p.y));
+    for(const k of walls) occ.add(k);
+    for(const k of obstacles) occ.add(k);
+    for(const f of foods) occ.add(key(f.x,f.y));
+    return occ;
+  }
+
+  function availableCells(){
+    const occ = occupiedSet();
+    const empty = [];
+    for(let x=1;x<GRID_W-1;x++){
+      for(let y=1;y<GRID_H-1;y++){
+        const k = key(x,y);
+        if(!occ.has(k)) empty.push({x,y});
+      }
+    }
+    return empty;
+  }
+
+  function spawnFoods(){
+    foods = [];
+    // 2 normal
+    for(let i=0;i<FOOD_NORMAL_COUNT;i++){
+      const empty = availableCells();
+      if(!empty.length){ gameOver=true; return; }
+      const p = choice(empty);
+      foods.push({x:p.x,y:p.y,type:"normal"});
+    }
+    // 1 gold
+    for(let i=0;i<FOOD_GOLD_COUNT;i++){
+      const empty = availableCells();
+      if(!empty.length){ gameOver=true; return; }
+      const p = choice(empty);
+      foods.push({x:p.x,y:p.y,type:"gold"});
+    }
+  }
+
+  function respawnFoodType(type){
+    const empty = availableCells();
+    if(!empty.length){ gameOver=true; return; }
+    for(const f of foods){
+      if(f.type===type){
+        const p = choice(empty);
+        f.x = p.x; f.y = p.y;
+        return;
+      }
+    }
+  }
+
+  function trimObstacles(target){
+    if(obstacles.size <= target) return;
+    const arr = Array.from(obstacles);
+    obstacles = new Set(arr.sort(()=>Math.random()-0.5).slice(0,target));
+  }
+
+  function generateObstacles(pattern=null){
+    obstacles = new Set();
+    const foodsSet = new Set(foods.map(f=>key(f.x,f.y)));
+    const snakeSet = new Set(snake.map(p=>key(p.x,p.y)));
+
+    function tooCloseToFood(x,y){
+      for(const f of foods){
+        if(Math.abs(x-f.x)<=1 && Math.abs(y-f.y)<=1) return true;
+      }
+      return false;
+    }
+    function ok(x,y){
+      const k = key(x,y);
+      if(walls.has(k) || foodsSet.has(k) || snakeSet.has(k)) return false;
+      if(tooCloseToFood(x,y)) return false;
+      const h = snake[0];
+      if(Math.abs(x-h.x)<=2 && Math.abs(y-h.y)<=2) return false;
+      return true;
+    }
+
+    const patterns = ["random","rooms","zigzag","pillars","cross"];
+    if(!pattern) pattern = choice(patterns);
+
+    let target = OBSTACLE_COUNT_BASE + Math.floor(score/3);
+    target = clamp(target, 22, 105);
+
+    if(pattern==="random"){
+      let tries = 0;
+      while(obstacles.size < target && tries < target*40){
+        tries++;
+        const x = randInt(1, GRID_W-2);
+        const y = randInt(1, GRID_H-2);
+        if(ok(x,y)) obstacles.add(key(x,y));
+      }
+    } else if(pattern==="pillars"){
+      const cols = [];
+      const pool = [];
+      for(let x=3;x<GRID_W-3;x++) pool.push(x);
+      pool.sort(()=>Math.random()-0.5);
+      for(let i=0;i<6 && i<pool.length;i++) cols.push(pool[i]);
+      for(const x of cols){
+        const gap = randInt(3, GRID_H-4);
+        for(let y=2;y<GRID_H-2;y++){
+          if(Math.abs(y-gap)<=2) continue;
+          if(ok(x,y)) obstacles.add(key(x,y));
+        }
+      }
+      trimObstacles(target);
+    } else if(pattern==="zigzag"){
+      let y = randInt(3, GRID_H-4);
+      let direction = 1;
+      for(let x=2;x<GRID_W-2;x++){
+        if(ok(x,y)) obstacles.add(key(x,y));
+        if(x%3===0){
+          y += direction;
+          if(y<=2 || y>=GRID_H-3){
+            direction *= -1;
+            y += direction;
+          }
+        }
+      }
+      trimObstacles(target);
+    } else if(pattern==="rooms"){
+      const midx = (GRID_W/2)|0, midy = (GRID_H/2)|0;
+      for(let x=2;x<GRID_W-2;x++){
+        if(x===midx) continue;
+        if(ok(x,midy)) obstacles.add(key(x,midy));
+      }
+      for(let y=2;y<GRID_H-2;y++){
+        if(y===midy) continue;
+        if(ok(midx,y)) obstacles.add(key(midx,y));
+      }
+      let extras = 30, tries = 0;
+      while(extras>0 && tries<1100){
+        tries++;
+        const x = randInt(2, GRID_W-3);
+        const y = randInt(2, GRID_H-3);
+        if(ok(x,y)){
+          obstacles.add(key(x,y));
+          extras--;
+        }
+      }
+      trimObstacles(target);
+    } else if(pattern==="cross"){
+      const midx = (GRID_W/2)|0, midy = (GRID_H/2)|0;
+      for(let x=2;x<GRID_W-2;x++){
+        if(x===midx-1 || x===midx || x===midx+1) continue;
+        if(ok(x,midy)) obstacles.add(key(x,midy));
+      }
+      for(let y=2;y<GRID_H-2;y++){
+        if(y===midy-1 || y===midy || y===midy+1) continue;
+        if(ok(midx,y)) obstacles.add(key(midx,y));
+      }
+      trimObstacles(target);
+    }
+  }
+
+  // -----------------------------
+  // Input
+  // -----------------------------
+  function setDir(dx,dy){
+    if(gameOver) return;
+    // ters dönme engeli
+    if(dx === -dir.x && dy === -dir.y) return;
+    nextDir = {x:dx,y:dy};
+  }
+
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if(k==="arrowup" || k==="w") { setDir(0,-1); e.preventDefault(); }
+    else if(k==="arrowdown" || k==="s") { setDir(0,1); e.preventDefault(); }
+    else if(k==="arrowleft" || k==="a") { setDir(-1,0); e.preventDefault(); }
+    else if(k==="arrowright" || k==="d") { setDir(1,0); e.preventDefault(); }
+    else if(k===" "){ paused = !paused; }
+    else if(k==="r"){ reset(); }
+  });
+
+  // -----------------------------
+  // Game loop
+  // -----------------------------
+  let lastTick = 0;
+  let lastFrame = 0;
+
+  function reset(){
+    paused = false;
+    gameOver = false;
+
+    tickMs = TICK_MS;
+    eaten = 0;
+    score = 0;
+
+    combo = 0;
+    lastEat = 0;
+
+    const cx = (GRID_W/2)|0, cy = (GRID_H/2)|0;
+    snake = [{x:cx,y:cy},{x:cx-1,y:cy},{x:cx-2,y:cy}];
+    dir = {x:1,y:0};
+    nextDir = {x:1,y:0};
+
+    makeStars(110);
+    floatTexts = [];
+    sparkles = [];
+
+    buildWalls();
+    foods = [];
+    spawnFoods();
+    generateObstacles("random");
+    // engel-yemek çakışması olursa düzelt
+    const bad = foods.some(f=>obstacles.has(key(f.x,f.y)));
+    if(bad) spawnFoods();
+
+    lastMapShift = now();
+    lastTick = performance.now();
+    lastFrame = performance.now();
+
+    updateUI();
+  }
+
+  function updateUI(){
+    scoreEl.textContent = score;
+    highEl.textContent = scoreData.highscore;
+    spdEl.textContent = (1000 / tickMs).toFixed(1) + " fps";
+    comboEl.textContent = (combo >= 2) ? ("x"+combo) : "-";
+  }
+
+  function stepLogic(){
+    if(gameOver || paused) return;
+
+    const t = now();
+
+    // dinamik harita
+    if((t - lastMapShift) >= MAP_SHIFT_EVERY_SEC){
+      lastMapShift = t;
+      generateObstacles(null);
+      spawnFoods();
+    }
+
+    // combo timeout
+    if(combo > 0 && (t - lastEat) > COMBO_WINDOW_SEC) combo = 0;
+
+    // hareket
+    dir = nextDir;
+    const head = snake[0];
+    const nx = head.x + dir.x;
+    const ny = head.y + dir.y;
+    const nk = key(nx,ny);
+
+    // çarpma
+    const snakeSet = new Set(snake.map(p=>key(p.x,p.y)));
+    if(walls.has(nk) || obstacles.has(nk) || snakeSet.has(nk)){
+      gameOver = true;
+      recordScore(score);
+      return;
+    }
+
+    snake.unshift({x:nx,y:ny});
+
+    // yemek yeme
+    let ate = false;
+    let eatenType = null;
+    for(const f of foods){
+      if(f.x===nx && f.y===ny){ ate=true; eatenType=f.type; break; }
+    }
+
+    if(ate){
+      eaten++;
+
+      if(eatenType==="gold"){
+        score += GOLD_SCORE;
+        addFloatText(nx,ny,`+${GOLD_SCORE}`,"score");
+        spawnGoldSparkles(nx,ny,12);
+      }else{
+        score += 1;
+        addFloatText(nx,ny,"+1","score");
+      }
+
+      // combo
+      if((t - lastEat) <= COMBO_WINDOW_SEC) combo++;
+      else combo = 1;
+      lastEat = t;
+      if(combo >= 2) addFloatText(nx,ny,`x${combo} COMBO!`,"combo");
+
+      // engel değişimi ara ara
+      if(score % 8 === 0) generateObstacles(null);
+
+      // hız artışı
+      if(eaten % SPEEDUP_EVERY === 0){
+        tickMs = Math.max(TICK_MIN_MS, Math.floor(tickMs * 0.90));
+      }
+
+      respawnFoodType(eatenType);
+    } else {
+      snake.pop();
+    }
+
+    updateUI();
+  }
+
+  // -----------------------------
+  // Render
+  // -----------------------------
+  function updateStars(){
+    for(const s of stars){
+      s.x += s.vx;
+      s.y += s.vy;
+      if(s.x < -5) s.x = W + 5;
+      else if(s.x > W + 5) s.x = -5;
+      if(s.y > H + 5){
+        s.y = -5;
+        s.x = Math.random()*W;
+        s.vy = 0.6 + Math.random()*1.2;
+        s.vx = choice([-0.35,-0.15,0.0,0.15,0.35]);
+        s.tw = randInt(14,34);
+        s.phase = randInt(0,1000);
+      }
+    }
+  }
+
+  function drawStars(){
+    const t = (performance.now()/1000*30)|0;
+    for(let i=0;i<stars.length;i++){
+      const s = stars[i];
+      const pulse = ((t + i + s.phase) % s.tw) < (s.tw/2);
+      const r = s.r + (pulse ? 0.9 : 0);
+      ctx.fillStyle = "#000000";
+      ctx.beginPath();
+      ctx.arc(s.x+1.2, s.y+1.2, r, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = "#c7d2fe";
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  function updateFloatTexts(){
+    const t = now();
+    floatTexts = floatTexts.filter(ft => (t - ft.born) <= FLOAT_LIFE);
+    for(const ft of floatTexts){
+      ft.y += ft.vy;
+    }
+  }
+
+  function drawFloatTexts(){
+    for(const ft of floatTexts){
+      const x = ft.x|0, y = ft.y|0;
+      const isCombo = ft.kind==="combo";
+      ctx.font = isCombo ? "bold 16px Segoe UI, system-ui" : "bold 14px Segoe UI, system-ui";
+      ctx.fillStyle = "#000000";
+      ctx.fillText(ft.text, x+2, y+2);
+      ctx.fillStyle = isCombo ? "#fde68a" : "#e0f2fe";
+      ctx.fillText(ft.text, x, y);
+    }
+  }
+
+  function updateSparkles(){
+    const t = now();
+    sparkles = sparkles.filter(p => (t - p.born) <= p.life);
+    for(const p of sparkles){
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.08;
+    }
+  }
+
+  function drawSparkles(){
+    const t = performance.now();
+    for(const p of sparkles){
+      const age = (t/1000) - p.born;
+      const tt = age / Math.max(0.001, p.life);
+      let r = 3 - 1.7*tt;
+      if(r < 1) r = 1;
+      const col = (((t/1000*30)|0) % 2 === 0) ? COLORS.sparkle1 : COLORS.sparkle2;
+
+      ctx.fillStyle = "#000000";
+      ctx.beginPath();
+      ctx.arc(p.x+1, p.y+1, r+1, 0, Math.PI*2);
+      ctx.fill();
+
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  function drawGrid(){
+    for(let y=0;y<GRID_H;y++){
+      for(let x=0;x<GRID_W;x++){
+        ctx.fillStyle = ((x+y)&1) ? COLORS.grid : COLORS.bg;
+        ctx.fillRect(x*CELL, y*CELL, CELL, CELL);
+      }
+    }
+  }
+
+  function drawCell(x,y,color,glow=false){
+    const px = x*CELL, py = y*CELL;
+    const pad = 2;
+    if(glow){
+      ctx.fillStyle = "rgba(0,0,0,.9)";
+      ctx.fillRect(px+2, py+2, CELL-2, CELL-2);
+    }
+    ctx.fillStyle = color;
+    ctx.fillRect(px+pad, py+pad, CELL-2*pad, CELL-2*pad);
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+
+    updateStars();
+    drawStars();
+    drawGrid();
+
+    // walls
+    ctx.fillStyle = COLORS.wall;
+    for(const k of walls){
+      const [x,y] = k.split(",").map(Number);
+      drawCell(x,y,COLORS.wall,false);
+    }
+
+    // obstacles
+    for(const k of obstacles){
+      const [x,y] = k.split(",").map(Number);
+      drawCell(x,y,COLORS.obst,false);
+    }
+
+    // foods
+    for(const f of foods){
+      drawCell(f.x,f.y, f.type==="gold" ? COLORS.gold : COLORS.food, true);
+    }
+
+    updateSparkles();
+    drawSparkles();
+
+    // snake
+    for(let i=0;i<snake.length;i++){
+      const p = snake[i];
+      drawCell(p.x,p.y, i===0 ? COLORS.head : COLORS.body, i===0);
+    }
+
+    updateFloatTexts();
+    drawFloatTexts();
+
+    // overlay
+    if(paused && !gameOver){
+      ctx.fillStyle = "rgba(0,0,0,.35)";
+      ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = COLORS.text;
+      ctx.font = "bold 28px Segoe UI, system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("DURAKLATILDI", W/2, H/2);
+      ctx.textAlign = "left";
+    }
+
+    if(gameOver){
+      ctx.fillStyle = "rgba(0,0,0,.45)";
+      ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = COLORS.text;
+      ctx.textAlign = "center";
+      ctx.font = "bold 42px Segoe UI, system-ui";
+      ctx.fillText("GAME OVER 💥", W/2, H*0.33);
+      ctx.font = "bold 18px Segoe UI, system-ui";
+      ctx.fillStyle = COLORS.soft;
+      ctx.fillText(`Skorun: ${score}`, W/2, H*0.41);
+      ctx.fillText("R ile yeniden başla", W/2, H*0.46);
+      ctx.textAlign = "left";
+    }
+  }
+
+  function loop(ts){
+    // tick
+    if(ts - lastTick >= tickMs){
+      lastTick = ts;
+      stepLogic();
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // init
+  loadScores();
+  renderLeaderboard();
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
